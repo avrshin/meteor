@@ -838,8 +838,13 @@ _.extend(PackageSource.prototype, {
     });
 
     const projectWatchSet = projectContext.getProjectWatchSet();
+
     const mainModulesByArch =
       projectContext.meteorConfig.getMainModulesByArch();
+
+    const testModulesByArch =
+      projectContext.meteorConfig.getTestModulesByArch();
+
     projectWatchSet.merge(projectContext.meteorConfig.watchSet);
 
     _.each(compiler.ALL_ARCHES, function (arch) {
@@ -852,6 +857,9 @@ _.extend(PackageSource.prototype, {
 
       const mainModule = projectContext.meteorConfig
         .getMainModuleForArch(arch, mainModulesByArch);
+
+      const testModule = projectContext.meteorConfig
+        .getTestModuleForArch(arch, testModulesByArch);
 
       // XXX what about /web.browser/* etc, these directories could also
       // be for specific client targets.
@@ -889,6 +897,7 @@ _.extend(PackageSource.prototype, {
               arch,
               isApp: true,
               mainModule,
+              testModule,
             });
 
             return {
@@ -951,13 +960,39 @@ _.extend(PackageSource.prototype, {
     arch,
     isApp,
     mainModule,
+    testModule,
   }) {
-    const fileOptions = {};
-    const isTest = global.testCommandMetadata
-      && global.testCommandMetadata.isTest;
-    const isAppTest = global.testCommandMetadata
-      && global.testCommandMetadata.isAppTest;
-    const isTestFile = (isTest || isAppTest) && isTestFilePath(relPath);
+    const fileOptions = Object.create(null);
+    const {
+      isTest = false,
+      isAppTest = false,
+    } = global.testCommandMetadata || {};
+
+    let isTestFile = false;
+    if (isTest || isAppTest) {
+      if (typeof testModule === "undefined") {
+        // If a testModule was not configured in the "meteor" section of
+        // package.json for this architecture, then isTestFilePath should
+        // determine whether this file loads eagerly.
+        isTestFile = isTestFilePath(relPath);
+      } else if (relPath === testModule) {
+        // If testModule is a string === relPath, then it is the entry
+        // point for tests, and should be loaded eagerly.
+        isTestFile = true;
+        fileOptions.lazy = false;
+        fileOptions.testModule = true;
+      } else {
+        // If testModule was defined but !== relPath, this file should not
+        // be loaded eagerly during tests. Setting fileOptions.testModule
+        // to false indicates that a testModule was configured, but this
+        // was not it. ResourceSlot#_isLazy (in compiler-plugin.js) will
+        // use this information (together with fileOptions.mainModule) to
+        // make the final call as to whether this file should be loaded
+        // eagerly or lazily.
+        isTestFile = false;
+        fileOptions.testModule = false;
+      }
+    }
 
     // If running in test mode (`meteor test`), all files other than
     // test files should be loaded lazily.
@@ -1006,6 +1041,12 @@ _.extend(PackageSource.prototype, {
       }
     }
 
+    // If we were able to make a confident determination of this file's
+    // laziness above, return early.
+    if (typeof fileOptions.lazy === "boolean") {
+      return fileOptions;
+    }
+
     if (isApp && typeof mainModule !== "undefined") {
       // If the mainModule === false, no JavaScript modules will be loaded
       // eagerly unless they were explicitly added with !fileOptions.lazy
@@ -1013,8 +1054,7 @@ _.extend(PackageSource.prototype, {
       // does not run any application JS on the client (or the server). Of
       // course, Meteor packages may still run JS on startup, but they
       // have their own rules for lazy/eager loading of modules.
-      if (typeof mainModule === "string" &&
-          relPath === mainModule) {
+      if (relPath === mainModule) {
         fileOptions.lazy = false;
         fileOptions.mainModule = true;
       } else if (typeof fileOptions.lazy === "undefined") {
